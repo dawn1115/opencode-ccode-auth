@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { CCodeAuthPlugin, _internal } from "../index.mjs"
 
-const { parseUsage, fetchUsage, PROVIDER, OPENAI_BASE } = _internal
+const { parseUsage, fetchUsage, PROVIDER, OPENAI_BASE, CLIENT_HEADER, DEFAULT_MODELS } = _internal
 
 // api.ccode.si/v1/limits 的真实响应（用户 Free 账号实测）
 const REAL_LIMITS = {
@@ -43,7 +43,9 @@ describe("插件结构", () => {
     await hooks.config(cfg)
     expect(cfg.provider[PROVIDER]).toBeDefined()
     expect(cfg.provider[PROVIDER].api).toBe(OPENAI_BASE)
-    expect(Object.keys(cfg.provider[PROVIDER].models).length).toBe(26)
+    expect(Object.keys(cfg.provider[PROVIDER].models).length).toBe(Object.keys(DEFAULT_MODELS).length)
+    expect(Object.keys(DEFAULT_MODELS)).toContain("glm-5.3-free")
+    expect(CLIENT_HEADER).toMatch(/^ccode\//)
     expect(hooks.auth.provider).toBe(PROVIDER)
     expect(typeof hooks.auth.usage).toBe("function")
     expect(hooks.provider.id).toBe(PROVIDER)

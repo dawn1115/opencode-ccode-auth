@@ -5,7 +5,12 @@
 // 官方 API 文档：https://ccode.si/docs/api
 
 const PROVIDER = "ccode"
-const PLUGIN_VERSION = "0.1.0"
+const PLUGIN_VERSION = "0.2.0"
+
+// CCode 服务端用这个头识别“官方客户端”，Free 账号的免费额度只对官方客户端开放。
+// 值必须是 ccode/<版本> 格式（大小写不敏感），其他值会被当作第三方工具返回 403。
+// 这是 CCode App/CLI 自己发送的正常标识，不是绕过鉴权。
+const CLIENT_HEADER = "ccode/1.12.1"
 
 // CCode 网关地址：
 // - OpenAI 格式基地址（chat completions）带 /v1
@@ -17,8 +22,17 @@ const ANTHROPIC_BASE = "https://api.ccode.si"
 // 这里用 openai-compatible（chat completions），magpie 会把任何 agent 的请求都转换成这个格式。
 const SDK_NPM = "@ai-sdk/openai-compatible"
 
-// 官网公布的 26 个模型（作为首次离线时的兜底列表；登录后由 provider.models 从 /models 动态刷新）
+// 官网公布的 26 个模型（作为首次离线时的兜底列表；登录后由 /models 动态刷新）。
+// Free 账号另可用 6 个 -free 变体（API id 用厂商的点号写法，如 kimi-k3.1-pro-free）。
 const DEFAULT_MODELS = {
+  // Free 套餐在 App/CLI 里可用的 6 个模型
+  "deepseek-v4.1-flash-free": { name: "DeepSeek V4.1 Flash (Free)", limit: { context: 128000, output: 32000 }, tool_call: true },
+  "glm-5.3-flash-free": { name: "GLM 5.3 Flash (Free)", limit: { context: 200000, output: 32000 }, tool_call: true },
+  "glm-5.3-free": { name: "GLM 5.3 (Free)", limit: { context: 200000, output: 32000 }, reasoning: true, tool_call: true },
+  "kimi-k3.1-pro-free": { name: "Kimi K3.1 Pro (Free)", limit: { context: 256000, output: 32000 }, reasoning: true, tool_call: true },
+  "qwen-4-max-free": { name: "Qwen 4 Max (Free)", limit: { context: 256000, output: 32000 }, reasoning: true, tool_call: true },
+  "qwen-3.8-max-free": { name: "Qwen 3.8 Max (Free)", limit: { context: 256000, output: 32000 }, reasoning: true, tool_call: true },
+  // 付费套餐的 26 个模型
   "claude-opus-5-5": { name: "Claude Opus 5.5", limit: { context: 200000, output: 32000 }, reasoning: true, tool_call: true },
   "claude-sonnet-5-5": { name: "Claude Sonnet 5.5", limit: { context: 200000, output: 64000 }, reasoning: true, tool_call: true },
   "claude-fable-5-2": { name: "Claude Fable 5.2", limit: { context: 200000, output: 64000 }, reasoning: true, tool_call: true },
@@ -360,7 +374,7 @@ export const CCodeAuthPlugin = async () => ({
           const headers = new Headers(init?.headers)
           headers.set("authorization", `Bearer ${auth.key}`)
           headers.set("x-api-key", auth.key)
-          headers.set("x-ccode-client", `magpie-ccode-auth/${PLUGIN_VERSION}`)
+          headers.set("x-ccode-client", CLIENT_HEADER)
           return fetch(input, { ...init, headers })
         },
       }
@@ -376,32 +390,43 @@ export const CCodeAuthPlugin = async () => ({
     },
   },
 
-  // 登录后从 /models 动态拉取这个账号可用的模型（含价格、上下文与输出上限）
+  // 登录后从 /models 动态拉取这个账号可用的模型（含价格、上下文与输出上限）。
+  // Free 账号的 /models 返回空；此时保留默认列表（含 6 个 -free 模型）。
   provider: {
     id: PROVIDER,
     async models(provider, { auth } = {}) {
       if (auth?.type !== "api" || !auth.key) return provider.models
-      let res
+      let payload = null
       try {
-        res = await fetch(`${OPENAI_BASE}/models`, { headers: authHeaders(auth.key) })
-      } catch {
-        return provider.models // 拉取失败时 magpie 保留原列表
-      }
-      if (!res.ok) return provider.models
-      let payload
-      try {
-        payload = await res.json()
+        const res = await fetch(`${OPENAI_BASE}/models`, { headers: authHeaders(auth.key) })
+        if (res.ok) payload = await res.json()
       } catch {
         return provider.models
       }
-      const list = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : null
+      let list = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : null
+
+      // /models 空时，试 /v1/limits 里的 models 字段（付费账号会带）
+      if (!list || list.length === 0) {
+        try {
+          const res = await fetch(`${OPENAI_BASE}/limits`, { headers: authHeaders(auth.key) })
+          if (res.ok) {
+            const limits = await res.json()
+            const m = limits?.models ?? limits?.tiers?.[limits.plan]?.models
+            if (m && typeof m === "object") {
+              list = Array.isArray(m) ? m : Object.entries(m).map(([id, v]) => ({ id, ...(v ?? {}) }))
+            }
+          }
+        } catch {
+          // 保持默认列表
+        }
+      }
       if (!list || list.length === 0) return provider.models
+
       const base = provider.models[Object.keys(provider.models)[0]] ?? Object.values(DEFAULT_MODELS)[0]
       const out = {}
       for (const m of list) {
         const id = typeof m === "string" ? m : m?.id
         if (!id || typeof id !== "string") continue
-        if (id.endsWith("-free")) continue // 文档：-free 结尾的是 App 专用的免费额度模型
         const context = asNumber(typeof m === "object" && m?.context_window)
         const output = asNumber(typeof m === "object" && m?.max_output_tokens)
         out[id] = {
@@ -423,6 +448,7 @@ export const _internal = {
   OPENAI_BASE,
   ANTHROPIC_BASE,
   DEFAULT_MODELS,
+  CLIENT_HEADER,
   parseUsage,
   fetchUsage,
   isoTime,
