@@ -44,23 +44,22 @@ opencode auth login   # 选 ccode，粘贴 API key
 
 登录后，在任意 agent 的模型选择列表里会多出一个 `ccode` 分组，例如 `ccode/claude-opus-5-5`、`ccode/glm-5-3`。选好开新会话即可。
 
-## 余额查询
+## 额度查询（所有额度种类分类显示）
 
-CCode 的余额模型（已在 app.ccode.si 真实页面确认）：
+插件查询 CCode 的 **`GET /v1/limits`**（和 App 页面同一套数据），把每一类额度分窗口显示：
 
-- 账户余额是 **credits**（美元计）：`user.credits`，Free/套餐每月重置（`creditsAreFree` 标记是否为免费额度）
-- 三个用量窗口：**5-hour / Weekly / Monthly**，各有美元上限与百分比用量
-- 每个 API key 另有 `spent`（累计花费）、`rpm`、`concurrency`
-- 充值余额（top-up balance）与套餐积分在 Billing 页分开显示
+- 当前档位（如 `free` / `paid`）的三个窗口 → `Free · 5-hour window`、`Free · Weekly window`、`Free · Monthly window`（参与路由决策）
+- 充值额度 `tiers.topup` → `Top-up · Weekly window`（`aside` 窗口，只显示不影响路由）
+- 付费档位 `tiers.paid` 有值时也会显示为 `Plan · …`
+- `/v1/key` 作为兜底（key 自身的 `credits`）
 
-插件从 CCode 的用量端点（`GET /v1/key`，必要时依次尝试 `/v1/usage`、`/v1/balance`）读取，字段解析覆盖：
+`magpie quota` 示例（Free 账号）：
 
-- `credits` / `balance` / `remaining` → 显示为 `balance`（如 `$12.34`）
-- `windows`（`five_hour` / `weekly` / `monthly`，对象或数组）→ magpie 用量窗口（名称、百分比、上限美元）
-- 平铺的 `used` + `limit` → 兜底的 `Plan usage` 窗口
-- 若响应字段都不认识，错误信息里会带上原始 payload，便于排查后更新字段名单
+```
+ccode · free · API key …IHyn  subscription  Free 5-hour window 0%  Free Weekly window 0%  Free Monthly window 0%  Top-up Weekly window 0%  $5.00 left
+```
 
-key 无效（401/403）时，账号会被标记为需要重新登录。
+> **注意**：Free 套餐的额度只能在 CCode 官方 App 里调用模型。从 magpie / 其他工具调用会返回 `403 plan_required`；要实际调用需升级 Starter（$1/月，$5 额度）或 Pro（$10/月，$70 额度），用付费账号的 key 重新登录。插件依然能正确显示免费账号的所有额度。
 
 ## 测试
 

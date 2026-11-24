@@ -1,6 +1,6 @@
 {
   "name": "opencode-ccode-auth",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode/magpie provider plugin for CCode (ccode.si): points at its API endpoint and reads plan balance",
   "type": "module",
   "main": "./index.mjs",

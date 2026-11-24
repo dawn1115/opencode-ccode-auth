@@ -48,25 +48,68 @@ const DEFAULT_MODELS = {
 }
 
 // ---------------------------------------------------------------------------
-// 余额查询
+// 额度查询
 //
-// CCode 的余额模型（从 app.ccode.si 真实页面确认）：
-//   - 账户余额是“credits”（美元计），每月随套餐重置：user.credits + creditsAreFree
-//   - 三个用量窗口：five_hour / weekly / monthly，各有 limit（美元）与 percent
-//   - 每个 API key 有 spent（该 key 累计花费）、rpm、concurrency
-//   - 付费充值余额（top-up balance）与 plan credits 分开显示
-// API 网关侧（api.ccode.si）文档确认存在 GET /v1/key（key 信息与限额），
-// /v1/usage、/v1/balance 也接受认证。这里优先网关端点，解析字段覆盖上述命名；
-// 全部失败时给出可操作的错误信息。
+// CCode 有两套额度，api.ccode.si 各有端点（均已用真实 key 验证）：
+//   GET /v1/limits — App 同款额度：当前档位 plan + 三个窗口
+//                    (five_hour / weekly / monthly，美元)，以及 tiers 分层：
+//                    tiers.free / tiers.paid / tiers.topup（充值额度）
+//   GET /v1/key    — 这个 API key 自身的额度（credits / topup_credits）
+//   GET /v1/usage  — 用量明细（费用、token、请求数）
+//
+// 插件以 /v1/limits 为主，把 tiers 里的每一类额度分窗口显示，让 magpie 的
+// quota / 账号卡片 / 网关 /v1/magpie/quotas 都能看到全部额度种类。
+// /v1/key 作为补充（key 自身剩余），/v1/usage 失败不影响额度显示。
 // ---------------------------------------------------------------------------
 
-const USAGE_ENDPOINTS = ["/key", "/usage", "/balance"]
+const USAGE_ENDPOINTS = ["/limits", "/key"]
 
 // CCode 计划窗口名 → 展示名
 const WINDOW_LABELS = { five_hour: "5-hour window", weekly: "Weekly window", monthly: "Monthly window" }
 
+// tier 名 → 展示前缀
+const TIER_LABELS = { paid: "Plan", free: "Free", topup: "Top-up" }
+
 function windowLabel(name) {
   return WINDOW_LABELS[name] ?? name
+}
+
+// 当前 plan 值 → tiers 里的档位名（"pro"/"starter" 都算 paid）
+function currentTierName(plan) {
+  const p = String(plan ?? "").toLowerCase()
+  if (p === "free") return "free"
+  if (!p || p === "topup") return null
+  return "paid"
+}
+
+// 把一份 tier（含 windows）展开成 magpie 窗口列表
+function tierWindows(tier, tierName, { aside = false } = {}) {
+  if (!tier || typeof tier !== "object") return []
+  const raw = tier.windows
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return []
+  const prefix = TIER_LABELS[tierName] ?? (tierName ? String(tierName) : "")
+  const out = []
+  for (const [name, w] of Object.entries(raw)) {
+    if (!w || typeof w !== "object") continue
+    const used = asNumber(w.used)
+    const limit = asNumber(w.limit)
+    const remaining = asNumber(w.remaining)
+    const percent = asNumber(w.percent)
+    // limit / remaining / percent 都没有 = 这个 tier 在该窗口没有额度，不显示
+    if (limit === null && remaining === null && percent === null) continue
+    out.push({
+      name: prefix ? `${prefix} · ${windowLabel(name)}` : windowLabel(name),
+      ...(percent !== null ? { used: Math.max(0, percent) }
+        : used !== null && limit > 0 ? { used: Math.max(0, Math.min(100, (used / limit) * 100)) }
+        : { used: null }),
+      ...(used !== null ? { amount: used } : {}),
+      ...(limit !== null ? { limit } : {}),
+      unit: "USD",
+      ...(isoTime(w.reset_at ?? w.resets_at ?? w.resetAt) ? { resetsAt: isoTime(w.reset_at ?? w.resets_at ?? w.resetAt) } : {}),
+      ...(aside ? { aside: true } : {}),
+    })
+  }
+  return out
 }
 
 function authHeaders(key) {
@@ -168,46 +211,40 @@ function parseUsage(data) {
     ? data.currency.trim().toUpperCase()
     : "USD"
 
-  // 计划窗口（five_hour / weekly / monthly …）：对象或数组都接受
+  const plan = planName(data)
   const windows = []
-  const rawWindows = data.windows ?? data.limits_window ?? data.windows_used
-    ?? (data.limits && typeof data.limits === "object" && !Array.isArray(data.limits)
-      ? data.limits
-      : null)
-  const entries = Array.isArray(rawWindows)
-    ? rawWindows.map((w) => [w?.name ?? w?.kind, w]).filter(([, w]) => w && typeof w === "object")
-    : rawWindows && typeof rawWindows === "object"
-      ? Object.entries(rawWindows).filter(([, v]) => v && typeof v === "object")
-      : []
 
-  for (const [name, w] of entries) {
-    const label = windowLabel(name)
-    const percent = asNumber(w.percent ?? w.used_percent ?? w.pct)
-    const usedAmt = asNumber(w.used ?? w.used_usd ?? w.spent)
-    const limitAmt = asNumber(w.limit ?? w.limit_usd ?? w.granted)
-    if (percent === null && usedAmt === null) continue
-    windows.push({
-      name: label,
-      ...(percent !== null ? { used: Math.max(0, Math.min(100, percent)) }
-        : limitAmt > 0 ? { used: Math.max(0, Math.min(100, (usedAmt / limitAmt) * 100)) }
-        : { used: null }),
-      ...(usedAmt !== null ? { amount: usedAmt } : {}),
-      ...(limitAmt !== null ? { limit: limitAmt } : {}),
-      unit: currency,
-      ...(isoTime(w.reset_at ?? w.resets_at ?? w.resetAt) ? { resetsAt: isoTime(w.reset_at ?? w.resets_at ?? w.resetAt) } : {}),
-    })
+  // /v1/limits：tiers 里每一类额度都显示；当前档位的窗口参与路由，其余 aside
+  if (data.tiers && typeof data.tiers === "object") {
+    const current = currentTierName(data.plan)
+    for (const [tierName, tier] of Object.entries(data.tiers)) {
+      if (!tier || typeof tier !== "object") continue
+      const isCurrent = tierName.toLowerCase() === current
+      const isTopup = tierName.toLowerCase() === "topup"
+      windows.push(...tierWindows(tier, tierName, { aside: !isCurrent || isTopup }))
+    }
   }
 
-  // 平铺的 used/limit（无窗口结构时）；单独的 spent（如 key 载荷）也当已用量展示
+  // /v1/limits 顶层 windows（当前档位）：若 tiers 没给则用它兜底
+  if (windows.length === 0 && data.windows && typeof data.windows === "object") {
+    const fake = { windows: data.windows }
+    windows.push(...tierWindows(fake, ""))
+  }
+
+  // 平铺的 used/limit（如 /v1/key 的 credits 或早期响应）
   if (windows.length === 0) {
-    const used = findNumber(data, ["used", "usage_amount", "spent", "consumed", "usage_usd"])
-    const limit = findNumber(data, ["limit", "monthly_limit", "quota", "allowance", "cap"])
+    const rawCredits = data.credits && typeof data.credits === "object" ? data.credits
+      : data.topup_credits && typeof data.topup_credits === "object" ? data.topup_credits
+      : data
+    const used = asNumber(rawCredits.used ?? findNumber(data, ["used", "usage_amount", "spent", "consumed", "usage_usd"]))
+    const limit = asNumber(rawCredits.limit ?? findNumber(data, ["limit", "monthly_limit", "quota", "allowance", "cap"]))
+    const remaining = asNumber(rawCredits.remaining)
     const resetsAt = isoTime(data.reset_at ?? data.resets_at ?? data.resetAt ?? data.renew_at)
-    if (used !== null) {
+    if (used !== null || remaining !== null) {
       windows.push({
-        name: "Spent",
-        ...(limit > 0 ? { used: Math.max(0, Math.min(100, (used / limit) * 100)) } : { used: null }),
-        amount: used,
+        name: "Plan usage",
+        ...(used !== null && limit > 0 ? { used: Math.max(0, Math.min(100, (used / limit) * 100)) } : { used: null }),
+        ...(used !== null ? { amount: used } : {}),
         ...(limit !== null ? { limit } : {}),
         unit: currency,
         ...(resetsAt ? { resetsAt } : {}),
@@ -215,22 +252,29 @@ function parseUsage(data) {
     }
   }
 
-  // 余额：credits（CCode 的账户余额）、top-up balance、minor 计价字段
+  // 余额：/v1/key 的 credits.remaining / topup_credits.remaining，或通用余额字段
   const minorNames = ["available_total_minor", "balance_minor", "remaining_minor", "total_minor", "credits_minor"]
   const minor = findNumber(data, minorNames)
   const balanceNames = [
-    "credits", "credits_remaining", "remaining", "balance", "remaining_balance",
+    "remaining", "credits_remaining", "balance", "remaining_balance",
     "available_balance", "available", "credit_balance", "quota_remaining",
     "amount_remaining", "wallet", "wallet_balance", "topup_balance", "top_up_balance",
   ]
-  let balanceValue = findNumber(data, balanceNames, { skipNames: minorNames })
+  let balanceValue = null
+  if (typeof data.credits === "number") {
+    balanceValue = data.credits
+  } else if (data.credits && typeof data.credits === "object") {
+    balanceValue = asNumber(data.credits.remaining)
+  }
+  if (balanceValue === null && data.topup_credits && typeof data.topup_credits === "object") {
+    balanceValue = asNumber(data.topup_credits.remaining)
+  }
+  if (balanceValue === null) balanceValue = findNumber(data, balanceNames, { skipNames: minorNames })
   if (balanceValue === null && minor !== null) balanceValue = minor / 100
 
-  const plan = planName(data)
   const out = { plan, windows }
   if (balanceValue !== null) out.balance = money(balanceValue, currency)
   if (balanceValue === null && windows.length === 0) {
-    // 端点可达但读不出余额：把原始响应放进 error 提示，便于排查字段名
     out.error = "CCode answered, but no balance field was recognised; see plugin logs"
     out.raw = data
   }
@@ -240,6 +284,9 @@ function parseUsage(data) {
 async function fetchUsage(key, fetchImpl = fetch) {
   let lastStatus = null
   let lastBody = ""
+  let keyResult = null
+
+  // 先取 App 同款分层额度；它成功就直接返回（包含所有 tiers 分类窗口）
   for (const path of USAGE_ENDPOINTS) {
     let res
     try {
@@ -265,12 +312,17 @@ async function fetchUsage(key, fetchImpl = fetch) {
       const data = await res.json()
       const parsed = parseUsage(data)
       if (parsed.error && path !== USAGE_ENDPOINTS[USAGE_ENDPOINTS.length - 1]) continue
-      return parsed
+      // /limits 有 tiers 时就是完整结果；其他端点只作兜底
+      if (path === "/limits" && data.tiers) return parsed
+      if (path !== "/key") return parsed
+      // /key 成功但 /limits 失败：记住它，最后作为兜底返回
+      keyResult = parsed
     } catch {
       lastStatus = res.status
       lastBody = "response was not JSON"
     }
   }
+  if (keyResult) return keyResult
   return {
     plan: "CCode API",
     windows: [],
