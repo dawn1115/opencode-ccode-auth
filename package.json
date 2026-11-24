@@ -1,0 +1,22 @@
+{
+  "name": "opencode-ccode-auth",
+  "version": "0.1.0",
+  "description": "OpenCode/magpie provider plugin for CCode (ccode.si): points at its API endpoint and reads plan balance",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": ["index.mjs", "README.md", "LICENSE"],
+  "keywords": ["opencode", "opencode-plugin", "opencode-provider", "ccode", "ccode-si", "magpie", "magpie-plugin"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dawn1115/opencode-ccode-auth.git"
+  },
+  "magpie": {
+    "name": "CCode (ccode.si)",
+    "summary": {
+      "en": "CCode (ccode.si) provider: sign in with an API key, chat on its models, and see plan balance and usage in magpie.",
+      "zh": "CCode（ccode.si）供应商：填 API key 即用全部模型，并在 magpie 里显示套餐余额与用量。"
+    },
+    "maxConcurrency": 8
+  }
+}
